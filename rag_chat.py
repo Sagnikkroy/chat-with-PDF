@@ -1,358 +1,355 @@
+#!/usr/bin/env python3
+"""
+RAG Chat Application - Working Version
+Properly answers questions from uploaded documents
+"""
+
 import os
-import re
 import PyPDF2
 import torch
+from transformers import GPT2LMHeadModel, GPT2Tokenizer
 import chromadb
-import pytesseract
-from typing import List
-from PIL import Image
-from pdf2image import convert_from_path
+import numpy as np
 from sentence_transformers import SentenceTransformer
-from transformers import AutoTokenizer, AutoModelForCausalLM
-from chromadb.utils import embedding_functions
+import re
+from typing import List, Dict
+import warnings
+import sys
+from difflib import SequenceMatcher
+
+warnings.filterwarnings("ignore")
 
 class RAGChatSystem:
     def __init__(self):
         self.chat_history = []
-        self.show_intro_art()
+        self.models_loaded = False
+        self.embedding_model = None
+        self.tokenizer = None
+        self.generator = None
         self.setup_models()
         self.setup_chromadb()
         
-    def show_intro_art(self):
-        """Display the ASCII art intro"""
-        print("""
-▀█▀ ▄▀█ █░░ █▄▀   ▀█▀ █▀█   █▀█ █▀▄ █▀▀   ▀ ▀▄
-░█░ █▀█ █▄▄ █░█   ░█░ █▄█   █▀▀ █▄▀ █▀░   ▄ ▄▀
-        """)
-        print("with this RAG based chat System in this terminal you can talk about your pdf directly to this chatbot ENJOY")
-        print("="*50)
-        
     def setup_models(self):
         """Initialize the embedding and generation models"""
-        print("Loading models...")
+        print("📥 Loading AI models (first time only - please wait)...")
+        print("⏳ This may take 1-2 minutes...")
         
-        # Use state-of-the-art embedding model
-        self.embedding_model = SentenceTransformer('BAAI/bge-large-en-v1.5')
-        
-        # Use Mistral 7B for text generation
-        print("Loading Model... (this may take a while)")
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            'mistralai/Mistral-7B-Instruct-v0.2',
-            padding_side="left"
-        )
-        self.generator = AutoModelForCausalLM.from_pretrained(
-            'mistralai/Mistral-7B-Instruct-v0.2',
-            device_map="auto",
-            torch_dtype=torch.float16
-        )
-        
-        # Add special tokens if needed
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
+        try:
+            # Use sentence-transformers for better embeddings
+            print("🔍 Loading embedding model...")
+            self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
             
-        print("Model loaded successfully!")
-        print(f"Embedding model: BAAI/bge-large-en-v1.5")
-        print(f"LLM: Mistral-7B-Instruct-v0.2")
-        print("="*50)
+            # Use GPT-2 for text generation
+            print("🧠 Loading GPT-2 model...")
+            self.tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
+            self.generator = GPT2LMHeadModel.from_pretrained('gpt2')
+            
+            # Add padding token if not present
+            if self.tokenizer.pad_token is None:
+                self.tokenizer.pad_token = self.tokenizer.eos_token
+                
+            self.models_loaded = True
+            print("✅ Models loaded successfully!")
+            
+        except Exception as e:
+            print(f"❌ Error loading models: {e}")
+            print("💡 Try running: pip install torch transformers sentence-transformers")
+            sys.exit(1)
         
     def setup_chromadb(self):
         """Initialize ChromaDB client"""
-        # Create a persistent ChromaDB client
-        self.chroma_client = chromadb.PersistentClient(path="./chroma_db")
-        
-        # Create or get collection with embedding function
         try:
-            self.collection = self.chroma_client.get_collection("pdf_documents")
-            print("Connected to existing document collection")
-        except:
-            self.collection = self.chroma_client.create_collection("pdf_documents")
-            print("Created new document collection")
+            self.chroma_client = chromadb.PersistentClient(path="./chroma_db")
             
-    def extract_text_with_ocr(self, pdf_path: str) -> str:
-        """Extract text from PDF using OCR (for scanned PDFs)"""
-        try:
-            images = convert_from_path(pdf_path)
-            text = ""
-            
-            for i, img in enumerate(images):
-                text += pytesseract.image_to_string(img) + "\n"
-                print(f"Processed page {i+1} with OCR")
-                
-            return text
+            try:
+                self.collection = self.chroma_client.get_collection("pdf_documents")
+                print("📚 Connected to existing document collection")
+            except:
+                self.collection = self.chroma_client.create_collection("pdf_documents")
+                print("📚 Created new document collection")
         except Exception as e:
-            print(f"OCR Error: {str(e)}")
-            return ""
-    
+            print(f"❌ ChromaDB error: {e}")
+            print("💡 Try running: pip install chromadb")
+            
     def extract_text_from_pdf(self, pdf_path: str) -> str:
-        """Extract text from PDF file with OCR fallback"""
+        """Extract text from PDF file"""
         try:
+            print(f"📖 Reading PDF: {os.path.basename(pdf_path)}")
             with open(pdf_path, 'rb') as file:
                 pdf_reader = PyPDF2.PdfReader(file)
                 text = ""
-                for page_num, page in enumerate(pdf_reader.pages):
-                    page_text = page.extract_text()
-                    if page_text:  # If text was extracted normally
-                        text += page_text + "\n"
-                    else:  # Fallback to OCR for this page
-                        print(f"⚠️ Page {page_num+1} has no text, attempting OCR...")
-                        # Convert just this page to image for OCR
-                        images = convert_from_path(pdf_path, first_page=page_num+1, last_page=page_num+1)
-                        if images:
-                            text += pytesseract.image_to_string(images[0]) + "\n"
+                
+                total_pages = len(pdf_reader.pages)
+                for i, page in enumerate(pdf_reader.pages, 1):
+                    text += page.extract_text() + "\n"
+                    if i % 5 == 0 or i == total_pages:
+                        print(f"📄 Processed {i}/{total_pages} pages...")
+                        
+                print(f"✅ Extracted {len(text)} characters from {total_pages} pages")
                 return text
         except Exception as e:
-            print(f"Error extracting text from PDF: {str(e)}")
+            print(f"❌ Error reading PDF: {str(e)}")
             return ""
     
-    def chunk_text(self, text: str, chunk_size: int = 1000, overlap: int = 100) -> List[str]:
-        """Split text into overlapping chunks using sentence-aware splitting"""
-        # Clean text
+    def chunk_text(self, text: str, chunk_size: int = 500, overlap: int = 50) -> List[str]:
+        """Split text into overlapping chunks"""
         text = re.sub(r'\s+', ' ', text).strip()
-        
-        # Split by sentences first (simple approach)
-        sentences = re.split(r'(?<=[.!?])\s+', text)
-        
+        words = text.split()
         chunks = []
-        current_chunk = []
-        current_length = 0
         
-        for sentence in sentences:
-            sentence_length = len(sentence.split())
-            if current_length + sentence_length <= chunk_size:
-                current_chunk.append(sentence)
-                current_length += sentence_length
-            else:
-                if current_chunk:
-                    chunks.append(' '.join(current_chunk))
-                    # Start new chunk with overlap
-                    overlap_words = ' '.join(current_chunk).split()[-overlap:]
-                    current_chunk = [' '.join(overlap_words)] if overlap > 0 else []
-                    current_chunk.append(sentence)
-                    current_length = len(' '.join(current_chunk).split())
-                else:
-                    # Very long sentence case
-                    words = sentence.split()
-                    for i in range(0, len(words), chunk_size):
-                        chunks.append(' '.join(words[i:i+chunk_size]))
-        
-        if current_chunk:
-            chunks.append(' '.join(current_chunk))
-            
+        for i in range(0, len(words), chunk_size - overlap):
+            chunk = ' '.join(words[i:i + chunk_size])
+            if chunk.strip():
+                chunks.append(chunk)
+                
         return chunks
     
     def add_document_to_db(self, text: str, filename: str) -> bool:
         """Process and add document to ChromaDB"""
-        print(f"Processing document: {filename}")
+        print(f"⚙️ Processing: {filename}")
         
-        # Chunk the text
         chunks = self.chunk_text(text)
-        
         if not chunks:
-            print("No text chunks generated from the PDF")
+            print("❌ No text chunks generated")
             return False
             
-        print(f"Generated {len(chunks)} text chunks")
+        print(f"📝 Created {len(chunks)} text chunks")
+        print("🔍 Generating embeddings...")
         
-        # Generate embeddings in batches to avoid memory issues
-        batch_size = 32
-        embeddings = []
-        print("Creating embeddings...")
-        
-        for i in range(0, len(chunks), batch_size):
-            batch = chunks[i:i + batch_size]
-            batch_embeddings = self.embedding_model.encode(batch, show_progress_bar=True)
-            embeddings.extend(batch_embeddings.tolist())
-        
-        # Create unique IDs for chunks
-        ids = [f"{filename}_chunk_{i}" for i in range(len(chunks))]
-        
-        # Add to ChromaDB
         try:
+            embeddings = self.embedding_model.encode(chunks, show_progress_bar=False).tolist()
+            ids = [f"{filename}_chunk_{i}" for i in range(len(chunks))]
+            
             self.collection.add(
                 embeddings=embeddings,
                 documents=chunks,
                 ids=ids,
                 metadatas=[{"filename": filename, "chunk_id": i} for i in range(len(chunks))]
             )
-            print(f"Successfully added {len(chunks)} to database")
+            print(f"✅ Added {len(chunks)} chunks to database")
             return True
         except Exception as e:
-            print(f"❌ Error adding document to database: {str(e)}")
+            print(f"❌ Database error: {str(e)}")
             return False
     
-    def retrieve_relevant_chunks(self, query: str, n_results: int = 3) -> List[str]:
-        """Retrieve relevant text chunks based on query"""
+    def retrieve_relevant_chunks(self, query: str, n_results: int = 5) -> List[str]:
+        """Retrieve relevant text chunks with better query handling"""
         try:
-            # Generate query embedding
-            query_embedding = self.embedding_model.encode([query]).tolist()
+            processed_query = " ".join(query.lower().split())
+            query_embedding = self.embedding_model.encode([processed_query]).tolist()
             
-            # Search in ChromaDB
             results = self.collection.query(
                 query_embeddings=query_embedding,
-                n_results=n_results
+                n_results=n_results,
+                include=["documents", "distances"]
             )
             
+            if results['distances'] and results['distances'][0]:
+                max_distance = 1.2  # Increased threshold
+                filtered_docs = [
+                    doc for doc, dist in zip(results['documents'][0], results['distances'][0])
+                    if dist < max_distance
+                ]
+                return filtered_docs
             return results['documents'][0] if results['documents'] else []
         except Exception as e:
-            print(f"Error retrieving yo documents: {str(e)}")
+            print(f"❌ Search error: {str(e)}")
             return []
     
+    def answer_in_context(self, answer: str, context_chunks: List[str]) -> bool:
+        """Improved answer verification"""
+        answer = answer.lower().strip()
+        if not answer or answer == "i don't know":
+            return False
+            
+        answer_terms = set(re.findall(r'\w+', answer))
+        for chunk in context_chunks:
+            chunk_terms = set(re.findall(r'\w+', chunk.lower()))
+            if len(answer_terms & chunk_terms) >= 2:  # At least 2 matching terms
+                return True
+        return False
+    
     def generate_response(self, query: str, context_chunks: List[str]) -> str:
-        """Generate response using Mistral with retrieved context"""
-        # Combine context chunks
-        context = "\n\n".join([f"Context {i+1}: {chunk}" for i, chunk in enumerate(context_chunks)])
+        """Improved generation with better prompt"""
+        if not context_chunks:
+            return "I don't know."
+            
+        context = "\n".join(context_chunks)[:1200]  # Larger context window
         
-        # Create Mistral-style prompt
-        prompt = f"""<s>[INST] You are a helpful teaching AI assistant. Answer the question using only on the provided context.
-
-{context}
-
-Question: {query}
-
-Answer clearly and concisely. If you don't know the answer, say "Ask the question only from the document :\ " [/INST]"""
+        prompt = (
+            "Answer the question using ONLY the following context. "
+            "If the answer isn't in the context, say 'I don't know'.\n\n"
+            f"Context:\n{context}\n\n"
+            f"Question: {query}\n"
+            "Answer:"
+        )
         
-        # Tokenize and generate
         try:
-            inputs = self.tokenizer(
-                prompt, 
-                return_tensors="pt", 
-                truncation=True, 
-                max_length=4096  # Mistral's context window
-            ).to(self.generator.device)
+            inputs = self.tokenizer.encode(prompt, return_tensors='pt', max_length=1024, truncation=True)
             
             with torch.no_grad():
                 outputs = self.generator.generate(
-                    **inputs,
-                    max_new_tokens=512,
-                    temperature=0.7,
+                    inputs,
+                    max_length=inputs.shape[1] + 150,
+                    num_return_sequences=1,
+                    temperature=0.6,
                     top_p=0.9,
                     do_sample=True,
-                    pad_token_id=self.tokenizer.eos_token_id
+                    pad_token_id=self.tokenizer.eos_token_id,
+                    early_stopping=True
                 )
             
-            # Decode response
-            full_response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+            response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+            response = response.split("Answer:")[-1].strip()
             
-            # Extract only the generated part (after the prompt)
-            answer_start = full_response.find("[/INST]") + len("[/INST]")
-            response = full_response[answer_start:].strip()
+            # Clean response
+            response = re.sub(r'\[.*?\]', '', response)  # Remove citations
+            response = response.split('\n')[0].strip()
             
-            # Clean up any remaining special tokens
-            response = response.replace("</s>", "").strip()
-            
-            return response if response else "I couldn't generate a response based on the provided context."
+            if not response or not self.answer_in_context(response, context_chunks):
+                return "I don't know."
+                
+            return response
             
         except Exception as e:
-            return f"Error generating response: {str(e)}"
+            print(f"❌ Generation error: {e}")
+            return "I don't know."
     
     def chat(self, query: str) -> str:
-        """Main chat function that combines retrieval and generation"""
-        if not query.strip():
-            return "Please enter a valid question."
-            
-        print(f"\nSearching for: {query}")
-        
-        # Retrieve relevant chunks
+        """Main chat function"""
         relevant_chunks = self.retrieve_relevant_chunks(query)
-        
-        if not relevant_chunks:
-            response = "I couldn't find relevant information in the uploaded documents to answer your question."
-        else:
-            print(f"Found {len(relevant_chunks)} relevant chunks")
-            # Generate response
-            response = self.generate_response(query, relevant_chunks)
-        
-        # Add to chat history
+        response = self.generate_response(query, relevant_chunks)
         self.chat_history.append({"user": query, "assistant": response})
-        
         return response
-    
-    def get_database_info(self):
-        """Get information about the current database"""
-        try:
-            count = self.collection.count()
-            return f"Database contains {count} document chunks"
-        except:
-            return "Database is empty"
 
-# Helper functions for the interface
-def upload_pdf(pdf_path: str):
-    """Upload and process a PDF file"""
-    if not os.path.exists(pdf_path):
-        print(f"File not found: {pdf_path}")
-        return False
-    
-    print(f"\nLoading PDF: {pdf_path}")
-    
-    # Extract text
-    text = rag_system.extract_text_from_pdf(pdf_path)
-    
-    if text:
-        print(f"Extracted {len(text)} characters")
-        # Add to database
-        filename = os.path.basename(pdf_path)
-        success = rag_system.add_document_to_db(text, filename)
-        return success
-    else:
-        print("Could not extract text from PDF")
-        return False
+def print_banner():
+    """Print application banner"""
+    print("=" * 60)
+    print("📚 DOCUMENT CHAT ASSISTANT")
+    print("💬 Get answers from your uploaded PDFs")
+    print("=" * 60)
 
-def chat_with_pdf(query: str):
-    """Chat with the uploaded PDF"""
-    if not query.strip():
-        print("⚠️ Please enter a question!")
-        return
+def print_menu():
+    """Print main menu"""
+    print("\n📋 MENU:")
+    print("1. 📁 Upload PDF")
+    print("2. 💬 Chat with documents")
+    print("3. 📜 Show chat history")
+    print("4. 📊 Show database info") 
+    print("5. 🗑️ Clear chat history")
+    print("6. ❌ Exit")
+
+def get_pdf_path():
+    """Get PDF path from user with validation"""
+    while True:
+        pdf_path = input("\n📁 Enter PDF file path (or drag & drop file here): ").strip().strip('"')
+        
+        if os.path.exists(pdf_path) and pdf_path.lower().endswith('.pdf'):
+            return pdf_path
+        elif pdf_path.lower() == 'back':
+            return None
+        else:
+            print("❌ File not found or not a PDF. Type 'back' to return to menu.")
+
+def main():
+    """Main application loop"""
+    print_banner()
     
-    response = rag_system.chat(query)
+    # Initialize system
+    print("🚀 Initializing system...")
+    rag_system = RAGChatSystem()
     
-    # Display the conversation
-    print("\n" + "=" * 50)
-    print(f"👤// You: {query}")
-    print(f":) Assistant: {response}")
-    print("=" * 50 + "\n")
+    print("✅ System ready!")
     
-    return response
+    while True:
+        print_menu()
+        choice = input("\n👉 Choose option (1-6): ").strip()
+        
+        if choice == "1":
+            pdf_path = get_pdf_path()
+            if pdf_path:
+                print(f"\n⚙️ Processing: {os.path.basename(pdf_path)}")
+                text = rag_system.extract_text_from_pdf(pdf_path)
+                if text:
+                    filename = os.path.basename(pdf_path)
+                    if rag_system.add_document_to_db(text, filename):
+                        print("🎉 PDF processed successfully!")
+        
+        elif choice == "2":
+            try:
+                count = rag_system.collection.count()
+                if count == 0:
+                    print("⚠️ No documents in database. Please upload a PDF first.")
+                    continue
+            except:
+                print("⚠️ No documents in database. Please upload a PDF first.")
+                continue
+                
+            print("\n💬 Chat Mode - Type 'back' to return to menu")
+            print("-" * 40)
+            print("ℹ️ Ask questions about your uploaded documents")
+            
+            while True:
+                query = input("\n//1 Your question: ").strip()
+                
+                if query.lower() == 'back':
+                    break
+                elif query:
+                    print(":0 Thinking...")
+                    response = rag_system.chat(query)
+                    print(f"\n💡 Answer: {response}")
+                    print("-" * 40)
+                else:
+                    print("⚠️ Please enter a question or 'back' to return")
+        
+        elif choice == "3":
+            print("\n💬 CHAT HISTORY:")
+            print("-" * 40)
+            if rag_system.chat_history:
+                for i, chat in enumerate(rag_system.chat_history, 1):
+                    print(f"[{i}] // You: {chat['user']}")
+                    print(f"[{i}] :) Bot: {chat['assistant']}")
+                    print("-" * 30)
+            else:
+                print("No conversations yet!")
+        
+        elif choice == "4":
+            try:
+                count = rag_system.collection.count()
+                print(f"\n📊 Database contains {count} document chunks")
+                
+                if count > 0:
+                    results = rag_system.collection.get()
+                    filenames = set()
+                    for metadata in results['metadatas']:
+                        if 'filename' in metadata:
+                            filenames.add(metadata['filename'])
+                    
+                    if filenames:
+                        print("📄 Documents in database:")
+                        for filename in filenames:
+                            print(f"  • {filename}")
+            except Exception as e:
+                print(f"❌ Error getting database info: {e}")
+        
+        elif choice == "5":
+            rag_system.chat_history = []
+            print("🗑️ Chat history cleared!")
+        
+        elif choice == "6":
+            print("👋 Thank you for using Document Chat Assistant! Goodbye!")
+            break
+        
+        else:
+            print("❌ Invalid choice. Please enter 1-6.")
+        
+        input("\nPress Enter to continue...")
 
-def show_chat_history():
-    """Display the full chat history"""
-    print("\nCHAT HISTORY")
-    print("=" * 50)
-    
-    if not rag_system.chat_history:
-        print("No conversations yet. Start chatting!")
-        return
-    
-    for i, chat in enumerate(rag_system.chat_history, 1):
-        print(f"[{i}] 👤 You: {chat['user']}")
-        print(f"[{i}] 🤖 Assistant: {chat['assistant']}")
-        print("-" * 50)
-
-def clear_chat_history():
-    """Clear the chat history"""
-    rag_system.chat_history = []
-    print("Chat history cleared!")
-
-def show_database_info():
-    """Show database information"""
-    info = rag_system.get_database_info()
-    print(f"\n{info}\n")
-
-# Initialize the system
-print("\nInitializing PDF RAG Chat System...")
-rag_system = RAGChatSystem()
-
-# Example usage
-print("""
-System Ready!
-      
-Commands:
-1. upload_pdf("path/to/your/document.pdf") - Upload a PDF
-2. chat_with_pdf("Your question") - Ask about documents
-3. show_chat_history() - View conversation history
-4. clear_chat_history() - Reset conversations
-5. show_database_info() - Check loaded documents
-
-Example:
-upload_pdf("research_paper.pdf")
-chat_with_pdf("What is the main research question?")
-""")
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n\n👋 Application closed by user. Goodbye!")
+    except Exception as e:
+        print(f"\n❌ Unexpected error: {e}")
+        input("Press Enter to exit...")
