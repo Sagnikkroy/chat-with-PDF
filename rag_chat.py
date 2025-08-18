@@ -297,7 +297,7 @@ def main():
                 elif query:
                     print(":0 Thinking...")
                     response = rag_system.chat(query)
-                    print(f"\n💡 Answer: {response}")
+                    print(f"\n :)  {response}")
                     print("-" * 40)
                 else:
                     print("⚠️ Please enter a question or 'back' to return")
