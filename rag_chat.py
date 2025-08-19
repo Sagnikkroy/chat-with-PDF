@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
-"""
-RAG Chat Application - Working Version
-Properly answers questions from uploaded documents
-"""
 
 import os
-import PyPDF2
+import fitz  # PyMuPDF
 import torch
 from transformers import GPT2LMHeadModel, GPT2Tokenizer
 import chromadb
@@ -15,8 +11,10 @@ import re
 from typing import List, Dict
 import warnings
 import sys
-from difflib import SequenceMatcher
+import nltk
+from nltk.stem import WordNetLemmatizer
 
+nltk.download('wordnet', quiet=True)  # Download WordNet for lemmatization
 warnings.filterwarnings("ignore")
 
 class RAGChatSystem:
@@ -26,330 +24,366 @@ class RAGChatSystem:
         self.embedding_model = None
         self.tokenizer = None
         self.generator = None
+        self.lemmatizer = WordNetLemmatizer()
         self.setup_models()
         self.setup_chromadb()
         
     def setup_models(self):
-        """Initialize the embedding and generation models"""
-        print("📥 Loading AI models (first time only - please wait)...")
-        print("⏳ This may take 1-2 minutes...")
-        
+        """Initialize models with better parameters"""
+        print("Loading AI models...")
         try:
-            # Use sentence-transformers for better embeddings
-            print("🔍 Loading embedding model...")
+            print("Loading embedding model...")
             self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
-            
-            # Use GPT-2 for text generation
-            print("🧠 Loading GPT-2 model...")
+            print("Loading language model...")
             self.tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
             self.generator = GPT2LMHeadModel.from_pretrained('gpt2')
-            
-            # Add padding token if not present
             if self.tokenizer.pad_token is None:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
-                
             self.models_loaded = True
-            print("✅ Models loaded successfully!")
-            
+            print(" Models loaded successfully!")
         except Exception as e:
-            print(f"❌ Error loading models: {e}")
-            print("💡 Try running: pip install torch transformers sentence-transformers")
+            print(f" Error loading models: {e}")
             sys.exit(1)
         
     def setup_chromadb(self):
-        """Initialize ChromaDB client"""
+        """Initialize ChromaDB with better configuration"""
         try:
             self.chroma_client = chromadb.PersistentClient(path="./chroma_db")
-            
-            try:
-                self.collection = self.chroma_client.get_collection("pdf_documents")
-                print("📚 Connected to existing document collection")
-            except:
-                self.collection = self.chroma_client.create_collection("pdf_documents")
-                print("📚 Created new document collection")
+            self.collection = self.chroma_client.get_or_create_collection(
+                name="pdf_documents",
+                metadata={"hnsw:space": "cosine"}
+            )
+            print(" Document collection ready")
         except Exception as e:
-            print(f"❌ ChromaDB error: {e}")
-            print("💡 Try running: pip install chromadb")
+            print(f" ChromaDB error: {e}")
+            sys.exit(1)
             
     def extract_text_from_pdf(self, pdf_path: str) -> str:
-        """Extract text from PDF file"""
+        """Improved PDF text extraction with PyMuPDF"""
         try:
-            print(f"📖 Reading PDF: {os.path.basename(pdf_path)}")
-            with open(pdf_path, 'rb') as file:
-                pdf_reader = PyPDF2.PdfReader(file)
-                text = ""
-                
-                total_pages = len(pdf_reader.pages)
-                for i, page in enumerate(pdf_reader.pages, 1):
-                    text += page.extract_text() + "\n"
-                    if i % 5 == 0 or i == total_pages:
-                        print(f"📄 Processed {i}/{total_pages} pages...")
-                        
-                print(f"✅ Extracted {len(text)} characters from {total_pages} pages")
-                return text
+            print(f"📖 Reading {os.path.basename(pdf_path)}...")
+            with fitz.open(pdf_path) as doc:
+                return "\n".join(page.get_text() for page in doc if page.get_text())
         except Exception as e:
-            print(f"❌ Error reading PDF: {str(e)}")
+            print(f" PDF error: {e}")
             return ""
     
-    def chunk_text(self, text: str, chunk_size: int = 500, overlap: int = 50) -> List[str]:
-        """Split text into overlapping chunks"""
+    def chunk_text(self, text: str) -> List[str]:
+        """Better text chunking with paragraph awareness"""
         text = re.sub(r'\s+', ' ', text).strip()
-        words = text.split()
+        sentences = re.split(r'(?<=[.!?])\s+', text)
         chunks = []
-        
-        for i in range(0, len(words), chunk_size - overlap):
-            chunk = ' '.join(words[i:i + chunk_size])
-            if chunk.strip():
-                chunks.append(chunk)
-                
-        return chunks
+        current_chunk = ""
+        for sentence in sentences:
+            if len(current_chunk) + len(sentence) < 400:
+                current_chunk += sentence + " "
+            else:
+                if current_chunk.strip():
+                    chunks.append(current_chunk.strip())
+                current_chunk = sentence + " "
+        if current_chunk.strip():
+            chunks.append(current_chunk.strip())
+        return [chunk for chunk in chunks if len(chunk.split()) > 5]
     
     def add_document_to_db(self, text: str, filename: str) -> bool:
-        """Process and add document to ChromaDB"""
-        print(f"⚙️ Processing: {filename}")
-        
+        """Enhanced document processing"""
         chunks = self.chunk_text(text)
         if not chunks:
-            print("❌ No text chunks generated")
             return False
-            
-        print(f"📝 Created {len(chunks)} text chunks")
-        print("🔍 Generating embeddings...")
-        
         try:
-            embeddings = self.embedding_model.encode(chunks, show_progress_bar=False).tolist()
-            ids = [f"{filename}_chunk_{i}" for i in range(len(chunks))]
-            
-            self.collection.add(
-                embeddings=embeddings,
-                documents=chunks,
-                ids=ids,
-                metadatas=[{"filename": filename, "chunk_id": i} for i in range(len(chunks))]
-            )
-            print(f"✅ Added {len(chunks)} chunks to database")
+            embeddings = self.embedding_model.encode(chunks, show_progress_bar=False, convert_to_tensor=True).cpu().numpy().tolist()
+            self.collection.add(embeddings=embeddings, documents=chunks, ids=[f"{filename}_{i}" for i in range(len(chunks))], metadatas=[{"source": filename} for _ in chunks])
+            print(f" Added {len(chunks)} chunks from {filename}")
             return True
         except Exception as e:
-            print(f"❌ Database error: {str(e)}")
+            print(f" DB error: {e}")
             return False
     
-    def retrieve_relevant_chunks(self, query: str, n_results: int = 5) -> List[str]:
-        """Retrieve relevant text chunks with better query handling"""
+    def retrieve_relevant_chunks(self, query: str) -> List[str]:
+        """Enhanced retrieval with adaptive relevance, aliases, and singular/plural handling"""
         try:
-            processed_query = " ".join(query.lower().split())
-            query_embedding = self.embedding_model.encode([processed_query]).tolist()
+            original_query = query
+            query_clean = re.sub(r'[^\w\s]', ' ', query.lower()).strip()
+            query_words = [self.lemmatizer.lemmatize(w) for w in re.findall(r'\w+', query_clean)]
+            query_variants = set()
+            for word in query_words:
+                query_variants.add(word)
+                if word.endswith('s'):
+                    query_variants.add(word[:-1])
+                else:
+                    query_variants.add(word + 's')
+            query_variants = list(query_variants) + [query_clean]
+            subject_aliases = {"voldemort": ["you-know-who", "he-who-must-not-be-named"], "ron": ["ron weasley"], "hermione": ["hermione granger"], "granger": ["hermione granger"]}
+            for word in query_words:
+                if word in subject_aliases:
+                    query_variants.extend(subject_aliases[word])
             
-            results = self.collection.query(
-                query_embeddings=query_embedding,
-                n_results=n_results,
-                include=["documents", "distances"]
-            )
+            all_chunks = []
+            all_distances = []
+            for variant in query_variants[:4]:
+                query_embedding = self.embedding_model.encode([variant]).tolist()
+                results = self.collection.query(query_embeddings=query_embedding, n_results=5, include=["documents", "distances"])
+                if results['documents'] and results['documents'][0]:
+                    all_chunks.extend(results['documents'][0])
+                    all_distances.extend(results['distances'][0])
             
-            if results['distances'] and results['distances'][0]:
-                max_distance = 1.2  # Increased threshold
-                filtered_docs = [
-                    doc for doc, dist in zip(results['documents'][0], results['distances'][0])
-                    if dist < max_distance
-                ]
-                return filtered_docs
-            return results['documents'][0] if results['documents'] else []
+            if not all_chunks:
+                return []
+            
+            unique_chunks = {}
+            for chunk, distance in zip(all_chunks, all_distances):
+                if chunk not in unique_chunks or distance < unique_chunks[chunk]:
+                    unique_chunks[chunk] = distance
+            
+            sorted_chunks = sorted(unique_chunks.items(), key=lambda x: x[1])
+            threshold = 1.5 if len(sorted_chunks) <= 2 else 1.0
+            
+            relevant_chunks = [chunk for chunk, distance in sorted_chunks if distance < threshold]
+            if not relevant_chunks and sorted_chunks:
+                relevant_chunks = [sorted_chunks[0][0]]
+            
+            print(f"Found {len(relevant_chunks)} relevant chunks (from {len(sorted_chunks)} total)")
+            if relevant_chunks and len(sorted_chunks) > 0:
+                print(f" Best match distance: {sorted_chunks[0][1]:.3f}")
+            
+            return relevant_chunks[:4]
+            
         except Exception as e:
-            print(f"❌ Search error: {str(e)}")
+            print(f" Retrieval error: {e}")
             return []
     
-    def answer_in_context(self, answer: str, context_chunks: List[str]) -> bool:
-        """Improved answer verification"""
-        answer = answer.lower().strip()
-        if not answer or answer == "i don't know":
-            return False
-            
-        answer_terms = set(re.findall(r'\w+', answer))
+    def extract_direct_answer(self, query: str, context_chunks: List[str]) -> str:
+        """Extract relevant sentences (fallback for generation)"""
+        query_lower = query.lower().strip()
+        full_context = "\n".join(context_chunks)
+        full_context_lower = full_context.lower()
+        
+        print(f"🔍 Query: '{query}'")
+        print(f"📝 Context preview: {full_context[:200]}...")
+        
+        main_subject = None
+        if re.match(r"who'?s\s+(\w+)", query_lower):
+            main_subject = re.match(r"who'?s\s+(\w+)", query_lower).group(1)
+        elif re.match(r"who\s+is\s+(\w+)", query_lower):
+            main_subject = re.match(r"who\s+is\s+(\w+)", query_lower).group(1)
+        elif re.match(r"(\w+)\s+who", query_lower):
+            main_subject = re.match(r"(\w+)\s+who", query_lower).group(1)
+        else:
+            words = query.split()
+            for word in words:
+                if word[0].isupper() and len(word) > 2:
+                    main_subject = word.lower()
+                    break
+            if not main_subject:
+                query_words = [w for w in re.findall(r'\w+', query_lower) if w not in {'who', 'what', 'is', 'the', 'a'}]
+                main_subject = query_words[-1] if query_words else None
+        
+        print(f"Looking for subject: '{main_subject}'")
+        if not main_subject:
+            return "I don't know."
+        
+        subject_patterns = [main_subject, main_subject.capitalize(), main_subject.title()]
+        best_sentences = []
+        
+        sentences = []
         for chunk in context_chunks:
-            chunk_terms = set(re.findall(r'\w+', chunk.lower()))
-            if len(answer_terms & chunk_terms) >= 2:  # At least 2 matching terms
-                return True
-        return False
+            chunk_sentences = re.split(r'(?<=[.!?])\s+', chunk)
+            sentences.extend([s.strip() for s in chunk_sentences if len(s.strip()) > 5])
+        
+        for sentence in sentences:
+            sentence_lower = sentence.lower()
+            mentions_subject = any(pattern.lower() in sentence_lower for pattern in subject_patterns)
+            if mentions_subject:
+                query_words_set = set(re.findall(r'\w+', query_lower))
+                sentence_words_set = set(re.findall(r'\w+', sentence_lower))
+                overlap = len(query_words_set.intersection(sentence_words_set))
+                descriptive_bonus = 1 if any(word in sentence_lower for word in ['is', 'was', 'said', 'friend', 'witch']) else 0
+                total_score = overlap + descriptive_bonus
+                if total_score >= 1:
+                    best_sentences.append((sentence.strip(), total_score))
+        
+        if best_sentences:
+            best_sentences.sort(key=lambda x: x[1], reverse=True)
+            for sentence, score in best_sentences:
+                clean_sentence = re.sub(r'^[^A-Z]*', '', sentence.strip())
+                if 5 <= len(clean_sentence.split()) <= 50 and not clean_sentence.startswith('"'):
+                    print(f"✅ Found direct text: {clean_sentence[:100]}...")
+                    return clean_sentence
+            if best_sentences:
+                return best_sentences[0][0].strip()
+        
+        for sentence in sentences:
+            sentence_lower = sentence.lower()
+            if (main_subject in sentence_lower and len(sentence.split()) >= 8 and
+                any(word in sentence_lower for word in ['is', 'was', 'said', 'friend', 'witch'])):
+                clean_sentence = sentence.strip()
+                print(f" Found contextual text: {clean_sentence[:100]}...")
+                return clean_sentence
+        
+        print(" No suitable text found in context")
+        return "I don't know."
     
     def generate_response(self, query: str, context_chunks: List[str]) -> str:
-        """Improved generation with better prompt"""
+        """Improved generation: Always reframe/summarize with GPT-2, with looser validation"""
         if not context_chunks:
-            return "I don't know."
-            
-        context = "\n".join(context_chunks)[:1200]  # Larger context window
+            return "I don't know - no relevant information found."
         
-        prompt = (
-            "Answer the question using ONLY the following context. "
-            "If the answer isn't in the context, say 'I don't know'.\n\n"
-            f"Context:\n{context}\n\n"
-            f"Question: {query}\n"
-            "Answer:"
-        )
+        # Get raw extracted text as starting point
+        direct_text = self.extract_direct_answer(query, context_chunks)
+        context = direct_text if direct_text != "I don't know." else " ".join(context_chunks)
         
-        try:
-            inputs = self.tokenizer.encode(prompt, return_tensors='pt', max_length=1024, truncation=True)
+        # Always attempt generation if context exists
+        if len(context) > 50:
+            print("🔄 Reframing answer with generation...")
+            # Enhanced prompt for identity and summarization
+            prompt = f"Using the following context from documents, provide a concise answer to the question 'Who is {query.split()[-1]}?' in your own words, summarizing key details about their identity:\nContext: {context[:800]}\nQuestion: {query}\nAnswer:"
             
-            with torch.no_grad():
-                outputs = self.generator.generate(
-                    inputs,
-                    max_length=inputs.shape[1] + 150,
-                    num_return_sequences=1,
-                    temperature=0.6,
-                    top_p=0.9,
-                    do_sample=True,
-                    pad_token_id=self.tokenizer.eos_token_id,
-                    early_stopping=True
+            try:
+                inputs = self.tokenizer(
+                    prompt,
+                    return_tensors='pt',
+                    padding=True,
+                    truncation=True,
+                    max_length=600
                 )
-            
-            response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-            response = response.split("Answer:")[-1].strip()
-            
-            # Clean response
-            response = re.sub(r'\[.*?\]', '', response)  # Remove citations
-            response = response.split('\n')[0].strip()
-            
-            if not response or not self.answer_in_context(response, context_chunks):
-                return "I don't know."
+                with torch.no_grad():
+                    output = self.generator.generate(
+                        input_ids=inputs['input_ids'],
+                        attention_mask=inputs['attention_mask'],
+                        max_new_tokens=70,
+                        temperature=0.6,
+                        top_k=25,
+                        top_p=0.8,
+                        repetition_penalty=1.2,
+                        do_sample=True,
+                        pad_token_id=self.tokenizer.pad_token_id,
+                        eos_token_id=self.tokenizer.eos_token_id
+                    )
+                response = self.tokenizer.decode(output[0], skip_special_tokens=True).split("Answer:")[-1].strip()
+                response = re.sub(r'\s+', ' ', response).strip()
                 
-            return response
-            
-        except Exception as e:
-            print(f"❌ Generation error: {e}")
-            return "I don't know."
+                # Looser validation
+                response_lower = response.lower()
+                bad_patterns = [r'she moines', r'i am \w+', r'well here goes']
+                context_words = set(re.findall(r'\w+', context.lower()))
+                refined_direct = re.sub(r'^.*?(is|was)\s+', '', direct_text).strip() if direct_text != "I don't know." else ""
+                if (any(re.search(p, response_lower) for p in bad_patterns) or
+                    len(response.split()) < 3 or len(response.split()) > 40 or
+                    (len(set(re.findall(r'\w+', response_lower)).intersection(context_words)) == 0 and len(response.split()) > 15 and not refined_direct)):
+                    print(" Generated response failed validation, refining fallback...")
+                    if direct_text != "I don't know.":
+                        return f"{query.split()[-1].capitalize()} is {refined_direct}"
+                    return "I don't know."
+                
+                print(f" Reframes response: {response[:100]}...")
+                return response
+            except Exception as e:
+                print(f" Generation failed: {e}")
+                if direct_text != "I don't know.":
+                    refined_direct = re.sub(r'^.*?(is|was)\s+', '', direct_text).strip()
+                    return f"{query.split()[-1].capitalize()} is {refined_direct}"
+                return "I don't know."
+        
+        return "I don't know."
     
     def chat(self, query: str) -> str:
-        """Main chat function"""
-        relevant_chunks = self.retrieve_relevant_chunks(query)
-        response = self.generate_response(query, relevant_chunks)
-        self.chat_history.append({"user": query, "assistant": response})
+        """Enhanced chat interface with better error handling"""
+        if not query.strip():
+            return "Please ask a question."
+        
+        try:
+            count = self.collection.count()
+            if count == 0:
+                return "No documents found. Please upload a PDF first."
+            print(f" Searching through {count} document chunks...")
+        except:
+            return "Database error. Please restart the application."
+            
+        print(" Searching documents...")
+        chunks = self.retrieve_relevant_chunks(query)
+        print(f"Retrieved chunks: {chunks}")
+        
+        if not chunks:
+            print(" Trying broader search...")
+            try:
+                results = self.collection.query(
+                    query_embeddings=self.embedding_model.encode([query]).tolist(),
+                    n_results=3,
+                    include=["documents"]
+                )
+                if results['documents'] and results['documents'][0]:
+                    chunks = results['documents'][0]
+                    print(" Using broader search results")
+            except:
+                pass
+        
+        if not chunks:
+            return "I don't know - couldn't find relevant information in the documents."
+        
+        print(" Generating answer...")
+        response = self.generate_response(query, chunks)
+        self.chat_history.append({
+            "user": query,
+            "assistant": response,
+            "context": chunks
+        })
         return response
 
-def print_banner():
-    """Print application banner"""
-    print("=" * 60)
-    print("📚 DOCUMENT CHAT ASSISTANT")
-    print("💬 Get answers from your uploaded PDFs")
-    print("=" * 60)
-
-def print_menu():
-    """Print main menu"""
-    print("\n📋 MENU:")
-    print("1. 📁 Upload PDF")
-    print("2. 💬 Chat with documents")
-    print("3. 📜 Show chat history")
-    print("4. 📊 Show database info") 
-    print("5. 🗑️ Clear chat history")
-    print("6. ❌ Exit")
-
-def get_pdf_path():
-    """Get PDF path from user with validation"""
-    while True:
-        pdf_path = input("\n📁 Enter PDF file path (or drag & drop file here): ").strip().strip('"')
-        
-        if os.path.exists(pdf_path) and pdf_path.lower().endswith('.pdf'):
-            return pdf_path
-        elif pdf_path.lower() == 'back':
-            return None
-        else:
-            print("❌ File not found or not a PDF. Type 'back' to return to menu.")
-
 def main():
-    """Main application loop"""
-    print_banner()
+    print("=" * 60)
+    print(" DOCUMENT CHAT")
+    print(" Get precise answers from your documents")
+    print("=" * 60)
     
-    # Initialize system
-    print("🚀 Initializing system...")
-    rag_system = RAGChatSystem()
-    
-    print("✅ System ready!")
+    rag = RAGChatSystem()
     
     while True:
-        print_menu()
-        choice = input("\n👉 Choose option (1-6): ").strip()
+        print("\n1. Upload PDF\n2. Ask question\n3. Show chat history\n4. Exit")
+        choice = input("Choose: ").strip()
         
         if choice == "1":
-            pdf_path = get_pdf_path()
-            if pdf_path:
-                print(f"\n⚙️ Processing: {os.path.basename(pdf_path)}")
-                text = rag_system.extract_text_from_pdf(pdf_path)
-                if text:
-                    filename = os.path.basename(pdf_path)
-                    if rag_system.add_document_to_db(text, filename):
-                        print("🎉 PDF processed successfully!")
+            path = input("PDF path: ").strip()
+            if os.path.exists(path):
+                text = rag.extract_text_from_pdf(path)
+                if text and rag.add_document_to_db(text, os.path.basename(path)):
+                    print(" Document processed successfully!")
+                else:
+                    print(" Failed to process document")
+            else:
+                print(" File not found")
         
         elif choice == "2":
-            try:
-                count = rag_system.collection.count()
-                if count == 0:
-                    print("⚠️ No documents in database. Please upload a PDF first.")
-                    continue
-            except:
-                print("⚠️ No documents in database. Please upload a PDF first.")
+            query = input("\nYour question: ").strip()
+            if query.lower() in ['exit', 'quit']:
+                break
+            
+            if not query:
+                print("Please enter a question.")
                 continue
                 
-            print("\n💬 Chat Mode - Type 'back' to return to menu")
+            print("\n" + "-" * 40)
+            answer = rag.chat(query)
+            print(f":] {answer}")
             print("-" * 40)
-            print("ℹ️ Ask questions about your uploaded documents")
-            
-            while True:
-                query = input("\n//1 Your question: ").strip()
-                
-                if query.lower() == 'back':
-                    break
-                elif query:
-                    print(":0 Thinking...")
-                    response = rag_system.chat(query)
-                    print(f"\n :)  {response}")
-                    print("-" * 40)
-                else:
-                    print("⚠️ Please enter a question or 'back' to return")
         
         elif choice == "3":
-            print("\n💬 CHAT HISTORY:")
-            print("-" * 40)
-            if rag_system.chat_history:
-                for i, chat in enumerate(rag_system.chat_history, 1):
-                    print(f"[{i}] // You: {chat['user']}")
-                    print(f"[{i}] :) Bot: {chat['assistant']}")
-                    print("-" * 30)
+            if rag.chat_history:
+                print("\n📝 Chat History:")
+                for i, chat in enumerate(rag.chat_history[-5:], 1):
+                    print(f"\n{i}. Q: {chat['user']}")
+                    print(f"   A: {chat['assistant']}")
             else:
-                print("No conversations yet!")
-        
-        elif choice == "4":
-            try:
-                count = rag_system.collection.count()
-                print(f"\n📊 Database contains {count} document chunks")
+                print("No chat history yet.")
                 
-                if count > 0:
-                    results = rag_system.collection.get()
-                    filenames = set()
-                    for metadata in results['metadatas']:
-                        if 'filename' in metadata:
-                            filenames.add(metadata['filename'])
-                    
-                    if filenames:
-                        print("📄 Documents in database:")
-                        for filename in filenames:
-                            print(f"  • {filename}")
-            except Exception as e:
-                print(f"❌ Error getting database info: {e}")
-        
-        elif choice == "5":
-            rag_system.chat_history = []
-            print("🗑️ Chat history cleared!")
-        
-        elif choice == "6":
-            print("👋 Thank you for using Document Chat Assistant! Goodbye!")
+        elif choice == "4":
             break
-        
-        else:
-            print("❌ Invalid choice. Please enter 1-6.")
-        
-        input("\nPress Enter to continue...")
+            
+    print("\n👋 Goodbye!")
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\n\n👋 Application closed by user. Goodbye!")
+        print("\n Exiting...")
     except Exception as e:
-        print(f"\n❌ Unexpected error: {e}")
-        input("Press Enter to exit...")
+        print(f"\n Fatal error: {e}")
