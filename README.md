@@ -6,7 +6,7 @@
 
 RAGPDF-Chat is an intelligent question-answering system that uses Retrieval-Augmented Generation (RAG) to provide precise answers from your PDF documents. Upload documents and ask natural questions about their content.
 
-![Document Chat Demo](https://via.placeholder.com/800x400.png?text=Document+Chat+Interface+Demo)
+![Document Chat Demo](./assets/Screenshot2025-08-19195438.png)
 
 
 ## RAGPDFCHAT 
