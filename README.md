@@ -4,7 +4,7 @@
 ![License](https://img.shields.io/badge/License-MIT-green)
 ![RAG](https://img.shields.io/badge/Architecture-RAG-orange)
 
-RAGPDF-Chat is an intelligent question-answering system that uses Retrieval-Augmented Generation (RAG) to provide precise answers from your PDF documents. Upload documents and ask natural questions about their content.
+RAGPDF-Chat is an intelligent question-answering system that uses Retrieval-Augmented Generation (RAG) to provide precise answers from your PDF documents. Upload documents and ask the AI natural questions about their content.
 
 ![Document Chat Demo](./assets/Screenshot2025-08-19195438.png)
 
